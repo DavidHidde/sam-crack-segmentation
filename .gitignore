@@ -174,3 +174,4 @@ cython_debug/
 .idea
 .DS_Store
 sam-checkpoints/*.pt
+data
