@@ -63,8 +63,8 @@ class CrackSAM(torch.nn.Module):
         # Encoder, loaded from SAM - Input: 1024x1024x3, Output: 256x64x64
         sam_model = load_sam(sam_variant, device)
         self.image_encoder = sam_model.image_encoder
-        self.image_encoder.trunk.train(freeze_trunk)
-        self.image_encoder.neck.train(freeze_neck)
+        self.image_encoder.trunk.train(not freeze_trunk)
+        self.image_encoder.neck.train(not freeze_neck)
 
         # Decoder from U-Net - Input: 256x64x64, Output: 1024x1024x1
         self.feature_decoder = torch.nn.Sequential(
