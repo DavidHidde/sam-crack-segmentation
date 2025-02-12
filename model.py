@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+from torch.nn.modules.module import T
 
 from sam2.modeling.sam2_utils import LayerNorm2d
 
@@ -12,7 +13,7 @@ class DecoderBlock(torch.nn.Module):
 
     conv: torch.nn.ConvTranspose2d
     norm: LayerNorm2d
-    dropout: Optional[torch.nn.Dropout]
+    dropout: Optional[torch.nn.Dropout] = None
 
     def __init__(
         self,
@@ -49,6 +50,9 @@ class CrackSAM(torch.nn.Module):
     image_encoder: torch.nn.Module
     feature_decoder: torch.nn.Sequential
 
+    freeze_neck: bool
+    freeze_trunk: bool
+
     def __init__(
         self,
         sam_variant: SAMVariant,
@@ -66,6 +70,9 @@ class CrackSAM(torch.nn.Module):
         self.image_encoder.trunk.train(not freeze_trunk)
         self.image_encoder.neck.train(not freeze_neck)
 
+        self.freeze_trunk = freeze_trunk
+        self.freeze_neck = freeze_neck
+
         # Decoder from U-Net - Input: 256x64x64, Output: 1024x1024x1
         self.feature_decoder = torch.nn.Sequential(
             DecoderBlock(256, 128, 2, 2, 0, 0.2),
@@ -74,8 +81,15 @@ class CrackSAM(torch.nn.Module):
             DecoderBlock(32, 16, 2, 2, 0, 0.),
             torch.nn.ConvTranspose2d(16, 1, 1, 1, 0),
             torch.nn.Sigmoid()
-        )
+        ).to(device)
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         """Forward pass of the model."""
-        return self.feature_decoder(self.image_encoder(image))
+        features = self.image_encoder(image)
+        return self.feature_decoder(features['vision_features'])
+
+    def train(self: T, mode: bool = True) -> T:
+        """Override the training mode to only set the decoder."""
+        super().train(mode)
+        self.image_encoder.trunk.train(mode and not self.freeze_trunk)
+        self.image_encoder.neck.train(mode and not self.freeze_neck)

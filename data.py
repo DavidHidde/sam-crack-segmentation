@@ -42,14 +42,15 @@ def scan_dataset_dir(dataset_dir: str) -> list[tuple[str, str]]:
 def gather_datasets(
     dataset_dir: str,
     test_split: float,
+    device: torch.device,
     transform: Optional[Callable] = None
 ) -> tuple[Dataset, Dataset]:
     """Get a test and training dataset from a directory. Datasets will load on the fly."""
     dataset_pairs = scan_dataset_dir(dataset_dir)
     train_split, test_split = train_test_split(dataset_pairs, test_size=test_split)
     return (
-        CrackSamDataset(train_split, transform=transform),
-        CrackSamDataset(test_split, transform=None) # Do not apply transforms to validation datasets
+        CrackSamDataset(train_split, device, transform=transform),
+        CrackSamDataset(test_split, device, transform=None) # Do not apply transforms to validation datasets
     )
 
 
@@ -59,11 +60,13 @@ class CrackSamDataset(Dataset):
     sample_paths: list[tuple[str, str]]
     preprocess_transform: SAM2Transforms
     transform: Optional[Callable]
+    device: torch.device
 
-    def __init__(self, sample_paths: list[tuple[str, str]], transform: Optional[Callable] = None):
+    def __init__(self, sample_paths: list[tuple[str, str]], device: torch.device, transform: Optional[Callable] = None):
         self.sample_paths = sample_paths
         self.preprocess_transform = SAM2Transforms(resolution=REQUIRED_DIM_SIZE, mask_threshold=MASK_THRESHOLD)
         self.transform = transform
+        self.device = device
 
     def __len__(self) -> int:
         """Return the number of samples in this dataset."""
@@ -77,7 +80,7 @@ class CrackSamDataset(Dataset):
 
         # Apply SAM transform and threshold mask
         image_tensor = self.preprocess_transform(image)
-        label_tensor = self.transform(label)
+        label_tensor = self.preprocess_transform(label)
         label_tensor = torch.where(label_tensor[[0], :, :] >= MASK_THRESHOLD, 255, 0)  # Threshold
 
         # Apply optional transform
@@ -85,4 +88,4 @@ class CrackSamDataset(Dataset):
             image_tensor = self.transform(image)
             label_tensor = self.transform(label)
 
-        return image_tensor, label_tensor
+        return image_tensor.to(self.device), label_tensor.to(self.device)
