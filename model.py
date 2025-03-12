@@ -49,6 +49,7 @@ class CrackSAM(torch.nn.Module):
 
     image_encoder: torch.nn.Module
     feature_decoder: torch.nn.Sequential
+    image_size: int
 
     freeze_neck: bool
     freeze_trunk: bool
@@ -66,6 +67,7 @@ class CrackSAM(torch.nn.Module):
 
         # Encoder, loaded from SAM - Input: 1024x1024x3, Output: 256x64x64
         sam_model = load_sam(sam_variant, device)
+        self.image_size = sam_model.image_size
         self.image_encoder = sam_model.image_encoder
         self.image_encoder.trunk.train(not freeze_trunk)
         self.image_encoder.neck.train(not freeze_neck)

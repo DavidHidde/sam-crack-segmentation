@@ -3,17 +3,15 @@ from typing import Callable, Optional
 
 import cv2
 import torch
+import numpy as np
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
-from sam2.utils.transforms import SAM2Transforms
+
+from transform import ImagePreprocessTransform, LabelPreprocessTransform
 
 IMAGE_DIR = 'images'
 LABEL_DIR = 'labels'
-PROCESSED_DATA_FILE = 'processed.pt'
-
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'JPG'}
-REQUIRED_DIM_SIZE = 1024
-MASK_THRESHOLD = 0.5
 
 
 def scan_dataset_dir(dataset_dir: str) -> list[tuple[str, str]]:
@@ -42,6 +40,7 @@ def scan_dataset_dir(dataset_dir: str) -> list[tuple[str, str]]:
 def gather_datasets(
     dataset_dir: str,
     test_split: float,
+    image_size: int,
     device: torch.device,
     transform: Optional[Callable] = None
 ) -> tuple[Dataset, Dataset]:
@@ -49,8 +48,8 @@ def gather_datasets(
     dataset_pairs = scan_dataset_dir(dataset_dir)
     train_split, test_split = train_test_split(dataset_pairs, test_size=test_split)
     return (
-        CrackSamDataset(train_split, device, transform=transform),
-        CrackSamDataset(test_split, device, transform=None) # Do not apply transforms to validation datasets
+        CrackSamDataset(train_split, image_size, device, transform=transform),
+        CrackSamDataset(test_split, image_size, device, transform=None) # Do not apply transforms to validation datasets
     )
 
 
@@ -58,15 +57,19 @@ class CrackSamDataset(Dataset):
     """A simple custom dataset which applies a transform to preloaded data."""
 
     sample_paths: list[tuple[str, str]]
-    preprocess_transform: SAM2Transforms
     transform: Optional[Callable]
     device: torch.device
+    
+    image_preprocess: ImagePreprocessTransform
+    label_preprocess: LabelPreprocessTransform
 
-    def __init__(self, sample_paths: list[tuple[str, str]], device: torch.device, transform: Optional[Callable] = None):
+    def __init__(self, sample_paths: list[tuple[str, str]], image_size: int, device: torch.device, transform: Optional[Callable] = None):
         self.sample_paths = sample_paths
-        self.preprocess_transform = SAM2Transforms(resolution=REQUIRED_DIM_SIZE, mask_threshold=MASK_THRESHOLD)
         self.transform = transform
+        self.image_size = image_size
         self.device = device
+        self.image_preprocess = ImagePreprocessTransform(image_size)
+        self.label_preprocess = LabelPreprocessTransform(image_size)
 
     def __len__(self) -> int:
         """Return the number of samples in this dataset."""
@@ -76,16 +79,16 @@ class CrackSamDataset(Dataset):
         """Return the pair of image and label."""
         image_path, label_path = self.sample_paths[index]
         image = cv2.imread(image_path)
-        label = cv2.imread(label_path)
+        label = cv2.imread(label_path, flags=cv2.IMREAD_GRAYSCALE)
 
         # Apply SAM transform and threshold mask
-        image_tensor = self.preprocess_transform(image)
-        label_tensor = self.preprocess_transform(label)
-        label_tensor = torch.where(label_tensor[[0], :, :] >= MASK_THRESHOLD, 255, 0)  # Threshold
+        image_tensor = self.image_preprocess(image)
+        label_tensor = self.label_preprocess(label)
 
         # Apply optional transform
         if self.transform:
-            image_tensor = self.transform(image)
-            label_tensor = self.transform(label)
+            image_tensor = self.transform(image_tensor)
+            label_tensor = self.transform(label_tensor)
 
-        return image_tensor.to(self.device), label_tensor.to(self.device)
+        return image_tensor.to(self.device, non_blocking=True), \
+            label_tensor.to(self.device, non_blocking=True)
