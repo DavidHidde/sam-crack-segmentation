@@ -20,13 +20,12 @@ SHUFFLE_DATA = True
 
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
-EPOCHS = 20
-SCHEDULER_STEP_SIZE = 8
+EPOCHS = 50
+SCHEDULER_STEP_SIZE = 10
 SCHEDULER_GAMMA = 0.2
 GRADIENT_ACCUMULATION_STEPS = 4
 
 EPOCHS_PER_CHECKPOINT = 10
-EPOCHS_PER_LOG = 5
 RUN_ID = '...'
 
 
@@ -41,15 +40,15 @@ def train_epoch(
     """Train the model for a single epoch and return the average loss."""
     total_loss = 0.
     for idx, (inputs, labels) in enumerate(tqdm(dataloader)):
+        inputs, labels = inputs.to(device, non_blocking=True, memory_format=torch.channels_last), labels.to(device, non_blocking=True, memory_format=torch.channels_last)
         # Get output and apply gradient
         with torch.amp.autocast(device.type, dtype=torch.float16):
             output = model(inputs)
             loss = loss_fn(output, labels)
-            total_loss += loss.item()
             loss = loss / GRADIENT_ACCUMULATION_STEPS
-        
+            
+        total_loss += loss.item()
         scaler.scale(loss).backward()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         # Apply gradient accumulation
         if (idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or (idx + 1) == len(dataloader):
@@ -67,12 +66,11 @@ def validate_epoch(
     device: torch.device
 ) -> tuple[float, float]:
     """Validate the epoch and return the average loss and F1-score."""
-    total_loss = 0.
     metric.reset()
     with torch.no_grad():
-        for data in tqdm(dataloader):
+        for (inputs, labels) in tqdm(dataloader):
+            inputs, labels = inputs.to(device, non_blocking=True, memory_format=torch.channels_last), labels.to(device, non_blocking=True, memory_format=torch.channels_last)
             with torch.amp.autocast(device.type, dtype=torch.float16):
-                inputs, labels = data
                 outputs = model(inputs)
                 metric(outputs, labels)
 
@@ -82,17 +80,24 @@ def validate_epoch(
 def main():
     """Main entrypoint"""
     device = torch.accelerator.current_accelerator() if torch.accelerator.is_available() else torch.device('cpu')
-    model = CrackSAM(SAM_VARIANT, device=device, freeze_trunk=True, freeze_neck=False)
+    model = CrackSAM(SAM_VARIANT, device=device, freeze_encoder=True)
 
-    train_dataset, test_dataset = gather_datasets(os.path.join('data', DATASET), TEST_SPLIT, model.image_size, device)
-    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=SHUFFLE_DATA, num_workers=6)
-    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=SHUFFLE_DATA, num_workers=6)
+    train_dataset, test_dataset = gather_datasets(os.path.join('data', DATASET), TEST_SPLIT, model.image_size)
+    loader_args = {
+        'batch_size': BATCH_SIZE,
+        'shuffle': SHUFFLE_DATA,
+        'num_workers': 6,
+        'pin_memory': True,
+        'persistent_workers': True
+    }
+    train_dataloader = DataLoader(train_dataset, **loader_args)
+    test_dataloader = DataLoader(test_dataset, **loader_args)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scaler = torch.amp.GradScaler()
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=SCHEDULER_STEP_SIZE, gamma=SCHEDULER_GAMMA)
     loss_fn = sm.losses.DiceLoss(mode='binary', eps=1e-7)
-    metric = BinaryF1Score().to(device)
+    metric = BinaryF1Score(threshold=0.5).to(device)
 
     output_dir = os.path.join('output', RUN_ID)
     logger = CSVLogger(exp_name='logs', log_dir=output_dir)
@@ -102,7 +107,7 @@ def main():
     for epoch in range(1, EPOCHS + 1):
         print(f'Epoch {epoch}/{EPOCHS}')
 
-        model.train(True)
+        model.train()
         average_train_loss = train_epoch(model, train_dataloader, scaler, optimizer, loss_fn, device)
         model.eval()
         average_f1 = validate_epoch(model, test_dataloader, metric, device)
@@ -115,6 +120,10 @@ def main():
             best_score = average_f1
             filename = f'{epoch}-f1-{average_f1:.2f}.pt'
             print(f'Model improved to {average_f1}, saving to {filename}')
+            torch.save(model.state_dict(), os.path.join(output_dir, filename))
+        elif epoch % EPOCHS_PER_CHECKPOINT == 0:
+            filename = f'{epoch}-checkpoint.pt'
+            print(f'Score did not improve from {best_score}, saving to checkpoint {filename}')
             torch.save(model.state_dict(), os.path.join(output_dir, filename))
         else:
             print(f'Score did not improve from {best_score}')

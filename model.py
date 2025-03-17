@@ -1,97 +1,124 @@
-from typing import Optional
-
 import torch
-from torch.nn.modules.module import T
-
-from sam2.modeling.sam2_utils import LayerNorm2d
 
 from load_sam import SAMVariant, load_sam
+        
 
+class SegmentationHead(torch.nn.Sequential):
+    """
+    Final layers that result in the binary segmentation map.
+    """
+
+    def __init__(self, in_channels: int):
+        super().__init__(
+            torch.nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(in_channels, 1, kernel_size=1, stride=1),
+            torch.nn.Sigmoid()
+        )
+
+class DoubleConvReluNorm(torch.nn.Sequential):
+    """Double Conv2d layer followed by a Relu and BatchNorm"""
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__(
+            torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.BatchNorm2d(out_channels),
+            torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.BatchNorm2d(out_channels)
+        )
 
 class DecoderBlock(torch.nn.Module):
-    """A decoder block of a specific size"""
+    """U-Net decoder block."""
 
-    conv: torch.nn.ConvTranspose2d
-    norm: LayerNorm2d
-    dropout: Optional[torch.nn.Dropout] = None
+    upscale_conv: torch.nn.ConvTranspose2d
+    conv: DoubleConvReluNorm
 
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
-        dropout: float
-    ):
-        super().__init__()
-        self.conv = torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride, padding)
-        self.norm = LayerNorm2d(out_channels)
+    def __init__(self, in_channels: int):
+        super(DecoderBlock, self).__init__()
+        out_channels = in_channels // 2
+        self.upscale_conv = torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.conv = DoubleConvReluNorm(in_channels, out_channels)
 
-        if dropout > 0:
-            self.dropout = torch.nn.Dropout(p=dropout)
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+        """Upscale and apply convs"""
+        x1 = self.upscale_conv(x1)
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the transpose conv, normalization, ReLu and optionally dropout."""
-        x = self.conv(x)
-        x = self.norm(x)
-        x = torch.nn.functional.relu(x)
-        if self.dropout:
-            x = self.dropout(x)
+class UNetDecoder(torch.nn.Module):
+    """Decoder of the U-Net model."""
 
-        return x
+    conv: DoubleConvReluNorm
+    blocks: torch.nn.ModuleList
+    segmentation_head: SegmentationHead
+
+    def __init__(self, base_channels: int, device: torch.device = torch.device('cpu')):
+        super(UNetDecoder, self).__init__()
+        self.segmentation_head = SegmentationHead(base_channels).to(device)
+
+        # Create decoder blocks top-down and reverse
+        self.blocks = torch.nn.ModuleList()
+        for idx in range(3):
+            base_channels *= 2
+            self.blocks.append(DecoderBlock(base_channels).to(device))
+        self.blocks = self.blocks[::-1]
+
+        self.conv = DoubleConvReluNorm(base_channels, base_channels).to(device)
+
+    def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
+        """Decode given features."""
+        features = features[::-1]
+
+        x = self.conv(features[0])
+        for skip, block in zip(features[1:], self.blocks):
+            x = block(x, skip)
+
+        return self.segmentation_head(x)
 
 
 class CrackSAM(torch.nn.Module):
-    """
-    The crack segmentation model, based on Meta's SAM 2.1 model.
-    """
+    """The crack segmentation model, based on Meta's SAM 2.1 model."""
 
     image_encoder: torch.nn.Module
-    feature_decoder: torch.nn.Sequential
-    image_size: int
+    feature_decoder: UNetDecoder
 
-    freeze_neck: bool
-    freeze_trunk: bool
+    image_size: int
 
     def __init__(
         self,
         sam_variant: SAMVariant,
-        freeze_trunk: bool = True,
-        freeze_neck: bool = False,
+        freeze_encoder: bool = True,
         device: torch.device = torch.device('cpu'),
         **kwargs
     ):
         """Initialize the model."""
         super(CrackSAM, self).__init__(**kwargs)
 
-        # Encoder, loaded from SAM - Input: 1024x1024x3, Output: 256x64x64
+        # Encoder, loaded from SAM - Input: 1024 x 1024 x 3, Output: channels x 32 x 32
         sam_model = load_sam(sam_variant, device)
+        self.image_encoder = sam_model.image_encoder.trunk
+        self.image_encoder.train(not freeze_encoder)
         self.image_size = sam_model.image_size
-        self.image_encoder = sam_model.image_encoder
-        self.image_encoder.trunk.train(not freeze_trunk)
-        self.image_encoder.neck.train(not freeze_neck)
 
-        self.freeze_trunk = freeze_trunk
-        self.freeze_neck = freeze_neck
+        if freeze_encoder:
+            for parameter in self.image_encoder.parameters():
+                parameter.requires_grad = False
 
-        # Decoder from U-Net - Input: 256x64x64, Output: 1024x1024x1
-        self.feature_decoder = torch.nn.Sequential(
-            DecoderBlock(256, 128, 2, 2, 0, 0.2),
-            DecoderBlock(128, 64, 2, 2, 0, 0.),
-            DecoderBlock(64, 32, 2, 2, 0, 0.2),
-            DecoderBlock(32, 16, 2, 2, 0, 0.),
-            torch.nn.ConvTranspose2d(16, 1, 1, 1, 0),
-            torch.nn.Sigmoid()
-        ).to(device)
+        # Decoder from U-Net - Input: channels x 32 x 32, Output: 1 x 1024 x 1024
+        match(sam_variant):
+            case SAMVariant.TINY | SAMVariant.SMALL:
+                base_channels = 96
+            case SAMVariant.BASE:
+                base_channels = 112
+            case SAMVariant.LARGE:
+                base_channels = 144
+
+        self.feature_decoder = UNetDecoder(base_channels, device=device)
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         """Forward pass of the model."""
-        features = self.image_encoder(image)
-        return self.feature_decoder(features['vision_features'])
-
-    def train(self: T, mode: bool = True) -> T:
-        """Override the training mode to only set the decoder."""
-        super().train(mode)
-        self.image_encoder.trunk.train(mode and not self.freeze_trunk)
-        self.image_encoder.neck.train(mode and not self.freeze_neck)
+        return self.feature_decoder(self.image_encoder(image))

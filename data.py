@@ -41,15 +41,14 @@ def gather_datasets(
     dataset_dir: str,
     test_split: float,
     image_size: int,
-    device: torch.device,
     transform: Optional[Callable] = None
 ) -> tuple[Dataset, Dataset]:
     """Get a test and training dataset from a directory. Datasets will load on the fly."""
     dataset_pairs = scan_dataset_dir(dataset_dir)
     train_split, test_split = train_test_split(dataset_pairs, test_size=test_split)
     return (
-        CrackSamDataset(train_split, image_size, device, transform=transform),
-        CrackSamDataset(test_split, image_size, device, transform=None) # Do not apply transforms to validation datasets
+        CrackSamDataset(train_split, image_size, transform=transform),
+        CrackSamDataset(test_split, image_size, transform=transform)
     )
 
 
@@ -58,16 +57,14 @@ class CrackSamDataset(Dataset):
 
     sample_paths: list[tuple[str, str]]
     transform: Optional[Callable]
-    device: torch.device
     
     image_preprocess: ImagePreprocessTransform
     label_preprocess: LabelPreprocessTransform
 
-    def __init__(self, sample_paths: list[tuple[str, str]], image_size: int, device: torch.device, transform: Optional[Callable] = None):
+    def __init__(self, sample_paths: list[tuple[str, str]], image_size: int, transform: Optional[Callable] = None):
         self.sample_paths = sample_paths
         self.transform = transform
         self.image_size = image_size
-        self.device = device
         self.image_preprocess = ImagePreprocessTransform(image_size)
         self.label_preprocess = LabelPreprocessTransform(image_size)
 
@@ -90,5 +87,4 @@ class CrackSamDataset(Dataset):
             image_tensor = self.transform(image_tensor)
             label_tensor = self.transform(label_tensor)
 
-        return image_tensor.to(self.device, non_blocking=True), \
-            label_tensor.to(self.device, non_blocking=True)
+        return image_tensor, label_tensor
