@@ -3,34 +3,31 @@ from typing import Callable, Optional
 
 import cv2
 import torch
-import numpy as np
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 
-from transform import ImagePreprocessTransform, LabelPreprocessTransform
+from util.transform import InputImageTransform, InputLabelTransform, DataAugmentationTransform
 
-IMAGE_DIR = 'images'
-LABEL_DIR = 'labels'
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'JPG'}
 
 
-def scan_dataset_dir(dataset_dir: str) -> list[tuple[str, str]]:
-    """Scan a dataset directory for image - label pairs."""
+def scan_dataset_dir(image_dir: str, label_dir: str) -> list[tuple[str, str]]:
+    """Scan dataset directories for image - label pairs."""
     file_name_buffer = set()
     pairs = []
 
     # First pass over image dir
-    for filename in os.listdir(os.path.join(dataset_dir, IMAGE_DIR)):
+    for filename in os.listdir(image_dir):
         if filename.split('.')[-1] in ALLOWED_EXTENSIONS:
             file_name_buffer.add(filename)
 
     # Second filtering pass over label dir
-    for filename in os.listdir(os.path.join(dataset_dir, IMAGE_DIR)):
+    for filename in os.listdir(label_dir):
         if filename in file_name_buffer:
             pairs.append(
                 (
-                    os.path.join(dataset_dir, IMAGE_DIR, filename),
-                    os.path.join(dataset_dir, LABEL_DIR, filename)
+                    os.path.join(image_dir, filename),
+                    os.path.join(label_dir, filename)
                 )
             )
 
@@ -38,35 +35,45 @@ def scan_dataset_dir(dataset_dir: str) -> list[tuple[str, str]]:
 
 
 def gather_datasets(
-    dataset_dir: str,
+    image_dir: str,
+    label_dir: str,
     test_split: float,
-    image_size: int,
-    transform: Optional[Callable] = None
+    image_size: tuple[int, int],
+    mask_threshold: float,
+    data_augmentations: bool
 ) -> tuple[Dataset, Dataset]:
     """Get a test and training dataset from a directory. Datasets will load on the fly."""
-    dataset_pairs = scan_dataset_dir(dataset_dir)
+    dataset_pairs = scan_dataset_dir(image_dir, label_dir)
     train_split, test_split = train_test_split(dataset_pairs, test_size=test_split)
+    transform = DataAugmentationTransform() if data_augmentations else None
     return (
-        CrackSamDataset(train_split, image_size, transform=transform),
-        CrackSamDataset(test_split, image_size, transform=transform)
+        SimpleDataset(train_split, image_size, mask_threshold, transform=transform),
+        SimpleDataset(test_split, image_size, mask_threshold, transform=None)  # No transforms on the validation set.
     )
 
 
-class CrackSamDataset(Dataset):
+class SimpleDataset(Dataset):
     """A simple custom dataset which applies a transform to preloaded data."""
 
+    image_size: tuple[int, int]
     sample_paths: list[tuple[str, str]]
     transform: Optional[Callable]
-    
-    image_preprocess: ImagePreprocessTransform
-    label_preprocess: LabelPreprocessTransform
 
-    def __init__(self, sample_paths: list[tuple[str, str]], image_size: int, transform: Optional[Callable] = None):
+    image_preprocess: InputImageTransform
+    label_preprocess: InputLabelTransform
+
+    def __init__(
+        self,
+        sample_paths: list[tuple[str, str]],
+        image_size: tuple[int, int],
+        mask_threshold: float,
+        transform: Optional[Callable] = None
+    ):
         self.sample_paths = sample_paths
         self.transform = transform
         self.image_size = image_size
-        self.image_preprocess = ImagePreprocessTransform(image_size)
-        self.label_preprocess = LabelPreprocessTransform(image_size)
+        self.image_preprocess = InputImageTransform(image_size)
+        self.label_preprocess = InputLabelTransform(image_size, mask_threshold)
 
     def __len__(self) -> int:
         """Return the number of samples in this dataset."""
