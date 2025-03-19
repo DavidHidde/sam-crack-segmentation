@@ -1,17 +1,18 @@
 import os
+import time
 from argparse import ArgumentParser
 
 import torch
 import segmentation_models_pytorch as sm
 
 from torch.utils.data import DataLoader
-from torchrl.record import CSVLogger
 from torchmetrics.classification import BinaryF1Score
 from tqdm import tqdm
 
 from model import CrackSAM
 from util.config import TrainConfig, load_config
 from util.data import gather_datasets
+from util.log import CSVLogger, MetricItem
 
 
 def train_epoch(
@@ -54,7 +55,7 @@ def validate_epoch(
     dataloader: DataLoader,
     metric: torch.nn.Module,
     device: torch.device
-) -> tuple[float, float]:
+) -> float:
     """Validate the epoch and return the average loss and F1-score."""
     metric.reset()
     with torch.no_grad():
@@ -68,7 +69,7 @@ def validate_epoch(
                 outputs = model(inputs)
                 metric(outputs, labels)
 
-    return metric.compute()
+    return metric.compute().item()
 
 
 def main(config: TrainConfig) -> None:
@@ -105,15 +106,24 @@ def main(config: TrainConfig) -> None:
     metric = BinaryF1Score(threshold=0.5).to(device)
 
     output_dir = os.path.join(config.output_dir, config.id)
-    logger = CSVLogger(exp_name='logs', log_dir=output_dir)
+    tracked_values = {
+        'epoch': MetricItem(name='Epoch', value=0),
+        'time': MetricItem(name='Time (s)', value=0),
+        'training_loss': MetricItem(name='Training loss', value=0),
+        'validation_f1': MetricItem(name='Validation F1-score', value=0),
+    }
+    logger = CSVLogger(os.path.join(output_dir, 'log.csv'), items=tracked_values.values())
+
     best_score = 0
+    start_time = time.time()
 
     # Start actual training
     for epoch in range(1, config.epochs + 1):
         print(f'Epoch {epoch}/{config.epochs}')
+        tracked_values['epoch'].value = epoch
 
         model.train()
-        average_train_loss = train_epoch(
+        tracked_values['training_loss'].value = train_epoch(
             model,
             train_dataloader,
             scaler,
@@ -124,25 +134,30 @@ def main(config: TrainConfig) -> None:
         )
         model.eval()
         average_f1 = validate_epoch(model, test_dataloader, metric, device)
+        tracked_values['validation_f1'].value = average_f1
+        tracked_values['time'].value = time.time() - start_time
 
-        print(f'Train loss: {average_train_loss} | Validation F1-score: {average_f1}')
-        logger.log_scalar('Training loss', average_train_loss, step=epoch)
-        logger.log_scalar('Validation F1-score', average_f1, step=epoch)
+        pretty_vals = [f'{item.name}: {round(item.value, 4) if '.' in str(item.value) else item.value}' for item in
+            tracked_values.values()]
+        print(' | '.join(pretty_vals))
+        logger.write_line()
 
         if average_f1 > best_score:
-            best_score = average_f1
             filename = f'{epoch}-f1-{average_f1:.2f}.pt'
-            print(f'Model improved to {average_f1}, saving to {filename}')
+            print(f'Model improved from {best_score:.4f} to {average_f1:.4f}, saving to {filename}')
             torch.save(model.state_dict(), os.path.join(output_dir, filename))
+            best_score = average_f1
         elif epoch % config.epochs_per_checkpoint == 0:
             filename = f'{epoch}-checkpoint.pt'
-            print(f'Score did not improve from {best_score}, saving to checkpoint {filename}')
+            print(f'Score did not improve from {best_score:.4f}, saving to checkpoint {filename}')
             torch.save(model.state_dict(), os.path.join(output_dir, filename))
         else:
-            print(f'Score did not improve from {best_score}')
+            print(f'Score did not improve from {best_score:.4f}')
 
         epoch += 1
         scheduler.step()
+
+    logger.close()
 
 
 if __name__ == "__main__":
