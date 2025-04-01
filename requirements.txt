@@ -5,6 +5,7 @@ opencv-python==4.11.0.86
 segmentation-models-pytorch==0.4.0
 torchrl==0.7.0
 torchmetrics==1.6.1
+loralib==0.1.2
 
 # Optional, can be manually installed - Comment these if needed
 torch==2.6.0

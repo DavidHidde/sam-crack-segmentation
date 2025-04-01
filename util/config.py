@@ -19,9 +19,14 @@ class TrainConfig:
     scheduler_step_size: int
     scheduler_gamma: float
 
-    # Model params
+    # Model/fine-tuning params
     sam_variant: SAMVariant
-    freeze_encoder: bool
+    freeze_trunk: bool
+    freeze_neck: bool
+    freeze_prompt_encoder: bool
+    freeze_mask_decoder: bool
+    apply_lora: bool
+    lora_rank: int
 
     # Data params
     image_directory: str

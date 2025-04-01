@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import BinaryF1Score
 from tqdm import tqdm
 
-from model import CrackSAM
+from model import SAM2Wrapper
 from util.config import TrainConfig, load_config
 from util.data import gather_datasets
 from util.log import CSVLogger, MetricItem
@@ -75,13 +75,22 @@ def validate_epoch(
 def main(config: TrainConfig) -> None:
     """Main entrypoint"""
     device = torch.accelerator.current_accelerator() if torch.accelerator.is_available() else torch.device('cpu')
-    model = CrackSAM(config.sam_variant, device=device, freeze_encoder=config.freeze_encoder)
+    model = SAM2Wrapper(
+        config.sam_variant,
+        freeze_encoder_trunk=config.freeze_trunk,
+        freeze_encoder_neck=config.freeze_neck,
+        freeze_prompt=config.freeze_prompt_encoder,
+        freeze_decoder=config.freeze_mask_decoder,
+        apply_lora=config.apply_lora,
+        lora_rank=config.lora_rank,
+        device=device
+    )
 
     train_dataset, test_dataset = gather_datasets(
         config.image_directory,
         config.label_directory,
         config.test_split,
-        (model.image_size, model.image_size),
+        (model.model.image_size, model.model.image_size),
         config.mask_threshold,
         config.augment
     )
@@ -103,7 +112,7 @@ def main(config: TrainConfig) -> None:
         gamma=config.scheduler_gamma
     )
     loss_fn = sm.losses.DiceLoss(mode='binary', eps=1e-7)
-    metric = BinaryF1Score(threshold=0.5).to(device)
+    metric = BinaryF1Score(threshold=config.mask_threshold).to(device)
 
     output_dir = os.path.join(config.output_dir, config.id)
     tracked_values = {
