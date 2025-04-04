@@ -1,1 +1,1 @@
-from .model import CrackSAM
+from .model import SAM2Wrapper

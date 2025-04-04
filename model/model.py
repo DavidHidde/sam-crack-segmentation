@@ -1,128 +1,117 @@
+import loralib as lora
 import torch
 from torch import nn, Tensor
 
+from sam2.modeling.sam2_base import SAM2Base
 from .functional.load_sam import SAMVariant, load_sam
 
-
-class SegmentationHead(nn.Sequential):
-    """
-    Final layers that result in the binary segmentation map.
-    """
-
-    def __init__(self, in_channels: int):
-        super().__init__(
-            nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, 1, kernel_size=1, stride=1),
-            nn.Sigmoid()
-        )
+FEAT_SIZES = [
+    (64, 64),
+    (128, 128),
+    (256, 256),
+]
 
 
-class DoubleConvReluNorm(nn.Sequential):
-    """Double Conv2d layer followed by a Relu and BatchNorm"""
+class SAM2Wrapper(nn.Module):
+    """A wrapper for training around Meta's SAM 2.1 model."""
 
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(out_channels),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(out_channels)
-        )
-
-
-class DecoderBlock(nn.Module):
-    """U-Net decoder block."""
-
-    upscale_conv: nn.ConvTranspose2d
-    conv: DoubleConvReluNorm
-
-    def __init__(self, in_channels: int):
-        super(DecoderBlock, self).__init__()
-        out_channels = in_channels // 2
-        self.upscale_conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
-        self.conv = DoubleConvReluNorm(in_channels, out_channels)
-
-    def forward(self, x1: Tensor, x2: Tensor) -> Tensor:
-        """Upscale and apply convs"""
-        x1 = self.upscale_conv(x1)
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-
-class UNetDecoder(nn.Module):
-    """Decoder of the U-Net model."""
-
-    conv: DoubleConvReluNorm
-    blocks: nn.ModuleList
-    segmentation_head: SegmentationHead
-
-    def __init__(self, base_channels: int, device: torch.device = torch.device('cpu')):
-        super(UNetDecoder, self).__init__()
-        self.segmentation_head = SegmentationHead(base_channels).to(device)
-
-        # Create decoder blocks top-down and reverse
-        self.blocks = nn.ModuleList()
-        for idx in range(3):
-            base_channels *= 2
-            self.blocks.append(DecoderBlock(base_channels).to(device))
-        self.blocks = self.blocks[::-1]
-
-        self.conv = DoubleConvReluNorm(base_channels, base_channels).to(device)
-
-    def forward(self, features: list[Tensor]) -> Tensor:
-        """Decode given features."""
-        features = features[::-1]
-
-        x = self.conv(features[0])
-        for skip, block in zip(features[1:], self.blocks):
-            x = block(x, skip)
-
-        return self.segmentation_head(x)
-
-
-class CrackSAM(nn.Module):
-    """The crack segmentation model, based on Meta's SAM 2.1 model."""
-
-    image_encoder: nn.Module
-    feature_decoder: UNetDecoder
-
-    image_size: int
+    model: SAM2Base
 
     def __init__(
         self,
         sam_variant: SAMVariant,
-        freeze_encoder: bool = True,
+        freeze_encoder_trunk: bool = True,
+        freeze_encoder_neck: bool = True,
+        freeze_prompt: bool = False,
+        freeze_decoder: bool = False,
+        apply_lora: bool = False,
+        lora_rank: int = 4,
         device: torch.device = torch.device('cpu'),
         **kwargs
     ):
         """Initialize the model."""
-        super(CrackSAM, self).__init__(**kwargs)
+        super(SAM2Wrapper, self).__init__(**kwargs)
+        self.model = load_sam(sam_variant, device)
+        self.freeze_components(freeze_encoder_trunk, freeze_encoder_neck, freeze_prompt, freeze_decoder)
 
-        # Encoder, loaded from SAM - Input: 1024 x 1024 x 3, Output: channels x 32 x 32
-        sam_model = load_sam(sam_variant, device)
-        self.image_encoder = sam_model.image_encoder.trunk
-        self.image_encoder.train(not freeze_encoder)
-        self.image_size = sam_model.image_size
+        if apply_lora:
+            self.inject_lora(lora_rank, device)
 
-        if freeze_encoder:
-            for parameter in self.image_encoder.parameters():
+    def freeze_components(
+        self,
+        freeze_encoder_trunk: bool,
+        freeze_encoder_neck: bool,
+        freeze_prompt: bool,
+        freeze_decoder: bool
+    ) -> None:
+        """Freeze specific components of the model based on the requirements."""
+        if freeze_encoder_trunk:
+            for param in self.model.image_encoder.trunk.parameters():
+                param.requires_grad = False
+
+        if freeze_encoder_neck:
+            for param in self.model.image_encoder.neck.parameters():
+                param.requires_grad = False
+
+        if freeze_prompt:
+            for param in self.model.sam_prompt_encoder.parameters():
+                param.requires_grad = False
+
+        if freeze_decoder:
+            for param in self.model.sam_mask_decoder.parameters():
+                param.requires_grad = False
+
+    def inject_lora(self, lora_rank: int, device: torch.device) -> None:
+        """Inject LoRA matrices into the encoder. Will always freeze the trunk."""
+        for block in self.model.image_encoder.trunk.blocks:
+            current_qkv = block.attn.qkv
+            new_qkv = lora.Linear(
+                current_qkv.in_features,
+                current_qkv.out_features,
+                bias=current_qkv.bias is not None,
+                device=device,
+                r=lora_rank,
+            )
+
+            # Temporarily remove requires_grad for copy; This is reset in the last expression.
+            for parameter in new_qkv.parameters():
                 parameter.requires_grad = False
 
-        # Decoder from U-Net - Input: channels x 32 x 32, Output: 1 x 1024 x 1024
-        match (sam_variant):
-            case SAMVariant.TINY | SAMVariant.SMALL:
-                base_channels = 96
-            case SAMVariant.BASE:
-                base_channels = 112
-            case SAMVariant.LARGE:
-                base_channels = 144
+            new_qkv.bias.copy_(current_qkv.bias)
+            new_qkv.weight.copy_(current_qkv.weight)
 
-        self.feature_decoder = UNetDecoder(base_channels, device=device)
+            # Finally, replace the layer.
+            block.attn.qkv = new_qkv
+
+        lora.mark_only_lora_as_trainable(self.model.image_encoder.trunk)
 
     def forward(self, image: Tensor) -> Tensor:
-        """Forward pass of the model."""
-        return self.feature_decoder(self.image_encoder(image))
+        """Forward pass of the model. Heavy inspiration taken from the SAM2ImagePredictor."""
+        batch_size = image.shape[0]
+        backbone_out = self.model.forward_image(image)
+        _, vision_feats, _, _ = self.model._prepare_backbone_features(backbone_out)
+        feats = [
+            feat.permute(1, 2, 0).view(batch_size, -1, *feat_size)
+            for feat, feat_size in zip(vision_feats[::-1], FEAT_SIZES)
+        ][::-1]
+        high_res_features = [feat_level for feat_level in feats[:-1]]
+
+        sparse_embeddings, dense_embeddings = self.model.sam_prompt_encoder(
+            points=None,
+            boxes=None,
+            masks=None,
+        )
+        sparse_embeddings = sparse_embeddings.tile((batch_size, 1, 1))
+        dense_embeddings = dense_embeddings.tile((batch_size, 1, 1, 1))
+
+        masks, _, _, _ = self.model.sam_mask_decoder(
+            image_embeddings=feats[-1],
+            image_pe=self.model.sam_prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=False,
+            repeat_image=False,
+            high_res_features=high_res_features,
+        )
+
+        return masks.float()
