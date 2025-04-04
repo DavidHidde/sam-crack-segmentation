@@ -3,6 +3,7 @@ from typing import Callable, Optional
 
 import cv2
 import torch
+import numpy as np
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 
@@ -62,6 +63,8 @@ class SimpleDataset(Dataset):
     image_preprocess: InputImageTransform
     label_preprocess: InputLabelTransform
 
+    cache: dict[str, tuple[np.ndarray, np.ndarray]]
+
     def __init__(
         self,
         sample_paths: list[tuple[str, str]],
@@ -74,6 +77,7 @@ class SimpleDataset(Dataset):
         self.image_size = image_size
         self.image_preprocess = InputImageTransform(image_size)
         self.label_preprocess = InputLabelTransform((image_size[0] // 4, image_size[1] // 4), mask_threshold)
+        self.cache = {}
 
     def __len__(self) -> int:
         """Return the number of samples in this dataset."""
@@ -82,10 +86,15 @@ class SimpleDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the pair of image and label."""
         image_path, label_path = self.sample_paths[index]
-        image = cv2.imread(image_path)
-        label = cv2.imread(label_path, flags=cv2.IMREAD_GRAYSCALE)
 
-        # Apply SAM transform and threshold mask
+        # Check and cache if necessary
+        data = self.cache.get(image_path)
+        if data is None:
+            data = (cv2.imread(image_path), cv2.imread(label_path, flags=cv2.IMREAD_GRAYSCALE))
+            self.cache[image_path] = data
+        image, label = data
+
+        # Apply SAM transform and threshold mask - Do not cache, as this might crash otherwise
         image_tensor = self.image_preprocess(image)
         label_tensor = self.label_preprocess(label)
 
