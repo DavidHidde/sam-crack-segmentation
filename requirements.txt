@@ -7,9 +7,12 @@ torchrl==0.7.0
 torchmetrics==1.6.1
 loralib==0.1.2
 
+# For export
+onnx==1.17.0
+onnxscript==0.2.3
+
 # Optional, can be manually installed - Comment these if needed
+-e git+https://github.com/facebookresearch/sam2.git@sam2.1#egg=sam-2
 torch==2.6.0
 torchaudio==2.6.0
 torchvision==0.21.0
-
-# Aside from this: make sure to install sam2 https://github.com/facebookresearch/sam2/tree/main (commit 2b90b9f) separately.

@@ -16,7 +16,7 @@ class SAMVariant(Enum):
 
 def load_sam(variant: SAMVariant, device: torch.device) -> SAM2Base:
     """Load a SAM variant from HuggingFace based on the model name."""
-    model_name = 'facebook/sam2-hiera'
+    model_name = 'facebook/sam2.1-hiera'
     match variant:
         case SAMVariant.TINY:
             model_name = f'{model_name}-tiny'

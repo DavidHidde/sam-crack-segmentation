@@ -14,8 +14,7 @@ STD = [0.229, 0.224, 0.225]
 
 # Data augmentation constants
 RANDOM_FLIP_PROBABILITY = 0.25
-RANDOM_ROTATION_PROBABILITY = 0.25
-ROTATION_RANGE = (-30, 30)
+ROTATION_RANGE = 30
 
 class InputImageTransform(nn.Sequential):
     """
@@ -59,7 +58,6 @@ class DataAugmentationTransform(nn.Sequential):
     def __init__(self):
         super().__init__(
             v2.RandomHorizontalFlip(RANDOM_FLIP_PROBABILITY),
-            v2.RandomVerticalFlip(RANDOM_FLIP_PROBABILITY),
             v2.RandomRotation(ROTATION_RANGE)
         )
 
