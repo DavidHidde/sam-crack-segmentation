@@ -16,6 +16,23 @@ STD = [0.229, 0.224, 0.225]
 RANDOM_FLIP_PROBABILITY = 0.25
 ROTATION_RANGE = 30
 
+
+class SquarePad(nn.Module):
+    """Module for padding images to be squares. Padding is added such that the original image is in the top left."""
+    value: float
+
+    def __init__(self, value: float):
+        super(SquarePad, self).__init__()
+        self.value = value
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Pad the tensor."""
+        _, h, w = x.size()
+        max_size = max(h, w)
+        padding = (0, w - max_size, 0, h - max_size)
+        return nn.functional.pad(x, padding, "constant", value=self.value)
+
+
 class InputImageTransform(nn.Sequential):
     """
     Preprocessing transforms for input images. These transforms match the SAM 2 image transforms.
@@ -25,6 +42,7 @@ class InputImageTransform(nn.Sequential):
     def __init__(self, image_size: tuple[int, int]):
         super().__init__(
             v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),  # toTensor
+            SquarePad(0.),
             v2.Resize(image_size),
             v2.Normalize(MEAN, STD)
         )
@@ -42,6 +60,7 @@ class InputLabelTransform(nn.Sequential):
         super().__init__(
             v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),  # toTensor
             v2.Grayscale(),
+            SquarePad(0.),
             v2.Resize(image_size, interpolation=InterpolationMode.NEAREST)
         )
         self.threshold = mask_threshold
@@ -49,7 +68,7 @@ class InputLabelTransform(nn.Sequential):
     def __call__(self, image: Union[Image, np.ndarray]) -> Tensor:
         """Apply transformation and return thresholded tensor."""
         label_tensor = super().forward(image)
-        return torch.where(label_tensor[[0], :, :] >= self.threshold, 1, 0)
+        return torch.where(label_tensor[[0], :, :] >= self.threshold, 1., 0.)
 
 
 class DataAugmentationTransform(nn.Sequential):
@@ -74,5 +93,8 @@ class OutputLabelTransform:
         """Transform a label tensor into a PIL image of a desired size."""
         label_copy = label.clone()
         label_copy = torch.where(label_copy >= self.threshold, 255, 0)
-        label_copy = v2.functional.resize(label_copy, image_size, interpolation=InterpolationMode.NEAREST)
+
+        max_size = max(image_size[0], image_size[1])
+        label_copy = nn.functional.interpolate(label_copy, [max_size, max_size], mode='bilinear', align_corners=False)
+        label_copy = label_copy[:image_size[1], :image_size[0]]
         return to_pil_image(label_copy.detach().cpu(), mode='L')

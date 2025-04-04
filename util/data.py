@@ -76,7 +76,7 @@ class SimpleDataset(Dataset):
         self.transform = transform
         self.image_size = image_size
         self.image_preprocess = InputImageTransform(image_size)
-        self.label_preprocess = InputLabelTransform((image_size[0] // 4, image_size[1] // 4), mask_threshold)
+        self.label_preprocess = InputLabelTransform((image_size[0], image_size[1]), mask_threshold)
         self.cache = {}
 
     def __len__(self) -> int:

@@ -5,6 +5,7 @@ from argparse import ArgumentParser
 import torch
 import segmentation_models_pytorch as sm
 
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchmetrics.classification import BinaryF1Score
 from tqdm import tqdm
@@ -16,7 +17,7 @@ from util.log import CSVLogger, MetricItem
 
 
 def train_epoch(
-    model: torch.nn.Module,
+    model: SAM2Wrapper,
     dataloader: DataLoader,
     scaler: torch.amp.GradScaler,
     optimizer: torch.optim.Optimizer,
@@ -26,6 +27,7 @@ def train_epoch(
 ) -> float:
     """Train the model for a single epoch and return the average loss."""
     total_loss = 0.
+    resize_dims = [model.model.image_size, model.model.image_size]
     for idx, (inputs, labels) in enumerate(tqdm(dataloader)):
         inputs, labels = inputs.to(device, non_blocking=True, memory_format=torch.channels_last), labels.to(
             device,
@@ -34,8 +36,9 @@ def train_epoch(
         )
         # Get output and apply gradient
         with torch.amp.autocast(device.type, dtype=torch.float16):
-            output = model(inputs)
-            loss = loss_fn(output, labels)
+            outputs = model(inputs)
+            outputs = F.interpolate(outputs, resize_dims, mode='bilinear', align_corners=False)
+            loss = loss_fn(outputs, labels)
             loss = loss / gradient_accumulation_steps
 
         total_loss += loss.item()
@@ -51,13 +54,14 @@ def train_epoch(
 
 
 def validate_epoch(
-    model: torch.nn.Module,
+    model: SAM2Wrapper,
     dataloader: DataLoader,
     metric: torch.nn.Module,
     device: torch.device
 ) -> float:
     """Validate the epoch and return the average loss and F1-score."""
     metric.reset()
+    resize_dims = [model.model.image_size, model.model.image_size]
     with torch.no_grad():
         for (inputs, labels) in tqdm(dataloader):
             inputs, labels = inputs.to(device, non_blocking=True, memory_format=torch.channels_last), labels.to(
@@ -67,6 +71,7 @@ def validate_epoch(
             )
             with torch.amp.autocast(device.type, dtype=torch.float16):
                 outputs = model(inputs)
+                outputs = F.interpolate(outputs, resize_dims, mode='bilinear', align_corners=False)
                 metric(outputs, labels)
 
     return metric.compute().item()
