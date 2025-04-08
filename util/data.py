@@ -41,15 +41,16 @@ def gather_datasets(
     test_split: float,
     image_size: tuple[int, int],
     mask_threshold: float,
-    data_augmentations: bool
+    data_augmentations: bool,
+    crop_image: bool
 ) -> tuple[Dataset, Dataset]:
     """Get a test and training dataset from a directory. Datasets will load on the fly."""
     dataset_pairs = scan_dataset_dir(image_dir, label_dir)
     train_split, test_split = train_test_split(dataset_pairs, test_size=test_split)
-    transform = DataAugmentationTransform() if data_augmentations else None
+    transform = DataAugmentationTransform(image_size, crop_image, mask_threshold) if data_augmentations else None
     return (
-        SimpleDataset(train_split, image_size, mask_threshold, transform=transform),
-        SimpleDataset(test_split, image_size, mask_threshold, transform=None)  # No transforms on the validation set.
+        SimpleDataset(train_split, image_size, mask_threshold, crop_image, transform=transform),
+        SimpleDataset(test_split, image_size, mask_threshold, False, transform=None)  # No transforms on the validation set.
     )
 
 
@@ -63,21 +64,19 @@ class SimpleDataset(Dataset):
     image_preprocess: InputImageTransform
     label_preprocess: InputLabelTransform
 
-    cache: dict[str, tuple[np.ndarray, np.ndarray]]
-
     def __init__(
         self,
         sample_paths: list[tuple[str, str]],
         image_size: tuple[int, int],
         mask_threshold: float,
+        crop_image: bool = False,
         transform: Optional[Callable] = None
     ):
         self.sample_paths = sample_paths
         self.transform = transform
         self.image_size = image_size
-        self.image_preprocess = InputImageTransform(image_size)
-        self.label_preprocess = InputLabelTransform((image_size[0], image_size[1]), mask_threshold)
-        self.cache = {}
+        self.image_preprocess = InputImageTransform(image_size, crop_image)
+        self.label_preprocess = InputLabelTransform((image_size[0], image_size[1]), crop_image, mask_threshold)
 
     def __len__(self) -> int:
         """Return the number of samples in this dataset."""
@@ -86,13 +85,7 @@ class SimpleDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the pair of image and label."""
         image_path, label_path = self.sample_paths[index]
-
-        # Check and cache if necessary
-        data = self.cache.get(image_path)
-        if data is None:
-            data = (cv2.imread(image_path), cv2.imread(label_path, flags=cv2.IMREAD_GRAYSCALE))
-            self.cache[image_path] = data
-        image, label = data
+        image, label = cv2.imread(image_path), cv2.imread(label_path, flags=cv2.IMREAD_GRAYSCALE)
 
         # Apply SAM transform and threshold mask - Do not cache, as this might crash otherwise
         image_tensor = self.image_preprocess(image)
@@ -100,7 +93,6 @@ class SimpleDataset(Dataset):
 
         # Apply optional transform
         if self.transform:
-            image_tensor = self.transform(image_tensor)
-            label_tensor = self.transform(label_tensor)
+            image_tensor, label_tensor = self.transform(image_tensor, label_tensor)
 
         return image_tensor, label_tensor

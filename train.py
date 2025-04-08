@@ -79,6 +79,7 @@ def validate_epoch(
 
 def main(config: TrainConfig) -> None:
     """Main entrypoint"""
+    torch.manual_seed(0) # Fix randomness
     device = torch.accelerator.current_accelerator() if torch.accelerator.is_available() else torch.device('cpu')
     model = SAM2Wrapper(
         config.sam_variant,
@@ -97,12 +98,13 @@ def main(config: TrainConfig) -> None:
         config.test_split,
         (model.model.image_size, model.model.image_size),
         config.mask_threshold,
-        config.augment
+        config.augment,
+        config.crop_image
     )
     loader_args = {
         'batch_size': config.batch_size,
         'shuffle': config.shuffle,
-        'num_workers': 6,
+        'num_workers': 12,
         'pin_memory': True,
         'persistent_workers': True
     }
@@ -151,7 +153,7 @@ def main(config: TrainConfig) -> None:
         tracked_values['validation_f1'].value = average_f1
         tracked_values['time'].value = time.time() - start_time
 
-        pretty_vals = [f'{item.name}: {round(item.value, 4) if '.' in str(item.value) else item.value}' for item in
+        pretty_vals = [f"{item.name}: {round(item.value, 4) if '.' in str(item.value) else item.value}" for item in
             tracked_values.values()]
         print(' | '.join(pretty_vals))
         logger.write_line()

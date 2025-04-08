@@ -15,6 +15,7 @@ STD = [0.229, 0.224, 0.225]
 # Data augmentation constants
 RANDOM_FLIP_PROBABILITY = 0.25
 ROTATION_RANGE = 30
+RESIZE_SCALE_RANGE = (0.6, 1.)
 
 
 class SquarePad(nn.Module):
@@ -29,7 +30,7 @@ class SquarePad(nn.Module):
         """Pad the tensor."""
         _, h, w = x.size()
         max_size = max(h, w)
-        padding = (0, w - max_size, 0, h - max_size)
+        padding = (0, max_size - w, 0, max_size - h)
         return nn.functional.pad(x, padding, "constant", value=self.value)
 
 
@@ -39,11 +40,11 @@ class InputImageTransform(nn.Sequential):
     Accepts a PIL image or numpy array and returns a tensor.
     """
 
-    def __init__(self, image_size: tuple[int, int]):
+    def __init__(self, image_size: tuple[int, int], crop_image: bool):
         super().__init__(
             v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),  # toTensor
             SquarePad(0.),
-            v2.Resize(image_size),
+            v2.Resize(image_size) if not crop_image else nn.Identity(),
             v2.Normalize(MEAN, STD)
         )
 
@@ -56,12 +57,12 @@ class InputLabelTransform(nn.Sequential):
 
     threshold: float
 
-    def __init__(self, image_size: tuple[int, int], mask_threshold: float):
+    def __init__(self, image_size: tuple[int, int], crop_image: bool, mask_threshold: float):
         super().__init__(
             v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),  # toTensor
             v2.Grayscale(),
             SquarePad(0.),
-            v2.Resize(image_size, interpolation=InterpolationMode.NEAREST)
+            v2.Resize(image_size, interpolation=InterpolationMode.NEAREST) if not crop_image else nn.Identity()
         )
         self.threshold = mask_threshold
 
@@ -71,14 +72,35 @@ class InputLabelTransform(nn.Sequential):
         return torch.where(label_tensor[[0], :, :] >= self.threshold, 1., 0.)
 
 
-class DataAugmentationTransform(nn.Sequential):
+class DataAugmentationTransform(nn.Module):
     """Data augmentation transforms for training."""
 
-    def __init__(self):
-        super().__init__(
+    geometric_transforms: nn.Sequential
+
+    threshold: float
+
+    def __init__(self, image_size: tuple[int, int], crop_image: bool, mask_threshold: float):
+        super(DataAugmentationTransform, self).__init__()
+        self.threshold = mask_threshold
+
+        self.geometric_transforms = nn.Sequential(
             v2.RandomHorizontalFlip(RANDOM_FLIP_PROBABILITY),
-            v2.RandomRotation(ROTATION_RANGE)
+            v2.RandomVerticalFlip(RANDOM_FLIP_PROBABILITY),
+            v2.RandomRotation(ROTATION_RANGE),
+            v2.RandomResizedCrop(size=image_size, scale=RESIZE_SCALE_RANGE, ratio=(1., 1.)) if crop_image else nn.Identity()
         )
+    
+    def forward(self, img: torch.Tensor, label: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply a data augmentation on an image and label pair. Only geometric transformations are applied to the label.
+        We keep track of the RNG state to ensure both the image and label apply the same transform.
+        """
+        rng_state = torch.get_rng_state()
+        img = self.geometric_transforms(img)
+        torch.set_rng_state(rng_state)
+        label = self.geometric_transforms(label)
+        label = torch.where(label >= self.threshold, 1., 0.)
+        return img, label
 
 
 class OutputLabelTransform:
