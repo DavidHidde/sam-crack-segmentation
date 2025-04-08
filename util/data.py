@@ -46,7 +46,14 @@ def gather_datasets(
 ) -> tuple[Dataset, Dataset]:
     """Get a test and training dataset from a directory. Datasets will load on the fly."""
     dataset_pairs = scan_dataset_dir(image_dir, label_dir)
-    train_split, test_split = train_test_split(dataset_pairs, test_size=test_split)
+
+    if test_split == 1.:
+        train_split, test_split = [], dataset_pairs
+    elif test_split == 0.:
+        train_split, test_split = dataset_pairs, []
+    else:
+        train_split, test_split = train_test_split(dataset_pairs, test_size=test_split)
+    
     transform = DataAugmentationTransform(image_size, crop_image, mask_threshold) if data_augmentations else None
     return (
         SimpleDataset(train_split, image_size, mask_threshold, crop_image, transform=transform),
