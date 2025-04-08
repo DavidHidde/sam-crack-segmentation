@@ -7,7 +7,7 @@ import segmentation_models_pytorch as sm
 
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
-from torchmetrics.classification import BinaryF1Score
+from torchmetrics.classification import BinaryF1Score, BinaryJaccardIndex, BinaryRecall
 from tqdm import tqdm
 
 from model import SAM2Wrapper
@@ -44,8 +44,11 @@ def train_epoch(
         total_loss += loss.item()
         scaler.scale(loss).backward()
 
-        # Apply gradient accumulation
+        # Apply gradient accumulation and gradient clipping
         if (idx + 1) % gradient_accumulation_steps == 0 or (idx + 1) == len(dataloader):
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -56,11 +59,13 @@ def train_epoch(
 def validate_epoch(
     model: SAM2Wrapper,
     dataloader: DataLoader,
-    metric: torch.nn.Module,
+    metrics: list[torch.nn.Module],
     device: torch.device
 ) -> float:
     """Validate the epoch and return the average loss and F1-score."""
-    metric.reset()
+    for metric in metrics:
+        metric.reset()
+
     resize_dims = [model.model.image_size, model.model.image_size]
     with torch.no_grad():
         for (inputs, labels) in tqdm(dataloader):
@@ -72,9 +77,11 @@ def validate_epoch(
             with torch.amp.autocast(device.type, dtype=torch.float16):
                 outputs = model(inputs)
                 outputs = F.interpolate(outputs, resize_dims, mode='bilinear', align_corners=False)
-                metric(outputs, labels)
 
-    return metric.compute().item()
+                for metric in metrics:
+                    metric(outputs, labels)
+
+    return [metric.compute().item() for metric in metrics]
 
 
 def main(config: TrainConfig) -> None:
@@ -119,7 +126,11 @@ def main(config: TrainConfig) -> None:
         gamma=config.scheduler_gamma
     )
     loss_fn = sm.losses.DiceLoss(mode='binary', eps=1e-7)
-    metric = BinaryF1Score(threshold=config.mask_threshold).to(device)
+    metrics = {
+        'validation_f1': BinaryF1Score(threshold=config.mask_threshold).to(device),
+        'validation_iou': BinaryJaccardIndex(threshold=config.mask_threshold).to(device),
+        'validation_recall': BinaryRecall(threshold=config.mask_threshold).to(device),
+    }
 
     output_dir = os.path.join(config.output_dir, config.id)
     tracked_values = {
@@ -127,6 +138,8 @@ def main(config: TrainConfig) -> None:
         'time': MetricItem(name='Time (s)', value=0),
         'training_loss': MetricItem(name='Training loss', value=0),
         'validation_f1': MetricItem(name='Validation F1-score', value=0),
+        'validation_iou': MetricItem(name='Validation IoU', value=0),
+        'validation_recall': MetricItem(name='Validation Recall', value=0),
     }
     logger = CSVLogger(os.path.join(output_dir, 'log.csv'), items=tracked_values.values())
 
@@ -149,20 +162,22 @@ def main(config: TrainConfig) -> None:
             config.gradient_accumulation_steps
         )
         model.eval()
-        average_f1 = validate_epoch(model, test_dataloader, metric, device)
-        tracked_values['validation_f1'].value = average_f1
+        metric_vals = validate_epoch(model, test_dataloader, metrics.values(), device)
         tracked_values['time'].value = time.time() - start_time
+        for idx, key in enumerate(metrics.keys()):
+            tracked_values[key].value = metric_vals[idx]        
 
         pretty_vals = [f"{item.name}: {round(item.value, 4) if '.' in str(item.value) else item.value}" for item in
             tracked_values.values()]
         print(' | '.join(pretty_vals))
         logger.write_line()
 
-        if average_f1 > best_score:
-            filename = f'{epoch}-f1-{average_f1:.2f}.pt'
-            print(f'Model improved from {best_score:.4f} to {average_f1:.4f}, saving to {filename}')
+        average_iou = metric_vals[1]
+        if average_iou > best_score:
+            filename = f'{epoch}-iou-{average_iou:.2f}.pt'
+            print(f'Model improved from {best_score:.4f} to {average_iou:.4f}, saving to {filename}')
             torch.save(model.state_dict(), os.path.join(output_dir, filename))
-            best_score = average_f1
+            best_score = average_iou
         elif epoch % config.epochs_per_checkpoint == 0:
             filename = f'{epoch}-checkpoint.pt'
             print(f'Score did not improve from {best_score:.4f}, saving to checkpoint {filename}')
