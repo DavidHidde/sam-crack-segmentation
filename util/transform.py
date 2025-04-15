@@ -111,12 +111,14 @@ class OutputLabelTransform:
     def __init__(self, mask_threshold: float):
         self.threshold = mask_threshold
 
-    def __call__(self, label: Tensor, image_size: tuple[int, int]) -> Image:
+    def __call__(self, labels: Tensor, image_size: tuple[int, int]) -> list[Image]:
         """Transform a label tensor into a PIL image of a desired size."""
-        label_copy = label.clone()
-        label_copy = torch.where(label_copy >= self.threshold, 255, 0)
-
+        label_copy = labels.clone()
         max_size = max(image_size[0], image_size[1])
         label_copy = nn.functional.interpolate(label_copy, [max_size, max_size], mode='bilinear', align_corners=False)
-        label_copy = label_copy[:image_size[1], :image_size[0]]
-        return to_pil_image(label_copy.detach().cpu(), mode='L')
+        label_copy = label_copy[:, :, :image_size[1], :image_size[0]]
+
+        label_copy = nn.functional.sigmoid(torch.clamp(label_copy, -32., 32))
+        label_copy = torch.where(label_copy >= self.threshold, 255, 0)
+        label_arr = label_copy.detach().cpu().numpy()
+        return [to_pil_image(arr.astype(np.uint8).squeeze()) for arr in label_arr]

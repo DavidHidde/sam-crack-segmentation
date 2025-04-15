@@ -61,7 +61,7 @@ def validate_epoch(
     dataloader: DataLoader,
     metrics: list[torch.nn.Module],
     device: torch.device
-) -> float:
+) -> list[float]:
     """Validate the epoch and return the average loss and F1-score."""
     for metric in metrics:
         metric.reset()
@@ -86,7 +86,7 @@ def validate_epoch(
 
 def main(config: TrainConfig) -> None:
     """Main entrypoint"""
-    torch.manual_seed(0) # Fix randomness
+    torch.manual_seed(0)  # Fix randomness
     device = torch.accelerator.current_accelerator() if torch.accelerator.is_available() else torch.device('cpu')
     model = SAM2Wrapper(
         config.sam_variant,
@@ -165,7 +165,7 @@ def main(config: TrainConfig) -> None:
         metric_vals = validate_epoch(model, test_dataloader, metrics.values(), device)
         tracked_values['time'].value = time.time() - start_time
         for idx, key in enumerate(metrics.keys()):
-            tracked_values[key].value = metric_vals[idx]        
+            tracked_values[key].value = metric_vals[idx]
 
         pretty_vals = [f"{item.name}: {round(item.value, 4) if '.' in str(item.value) else item.value}" for item in
             tracked_values.values()]
