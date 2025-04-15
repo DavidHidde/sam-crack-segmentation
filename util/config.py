@@ -35,6 +35,7 @@ class TrainConfig:
     mask_threshold: float
     shuffle: bool
     augment: bool
+    crop_image: bool
 
     # Output params
     output_dir: str
