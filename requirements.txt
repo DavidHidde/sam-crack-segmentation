@@ -1,0 +1,18 @@
+# Base deps, always applicable
+matplotlib==3.10.0
+scikit-learn==1.6.1
+opencv-python==4.11.0.86
+segmentation-models-pytorch==0.4.0
+torchrl==0.7.0
+torchmetrics==1.6.1
+loralib==0.1.2
+
+# For export
+onnx==1.17.0
+onnxscript==0.2.3
+
+# Optional, can be manually installed - Comment these if needed
+-e git+https://github.com/facebookresearch/sam2.git@sam2.1#egg=sam-2
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0

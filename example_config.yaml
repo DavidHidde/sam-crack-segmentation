@@ -1,0 +1,32 @@
+id: example
+
+# Training hyperparams
+epochs: 50
+batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 0.00001
+weight_decay: 0.00001
+scheduler_step_size: 2000
+scheduler_gamma: 0.1
+
+# Model params
+sam_variant: 'tiny'
+freeze_trunk: True
+freeze_neck: True
+freeze_prompt_encoder: False
+freeze_mask_decoder: False
+apply_lora: True
+lora_rank: 8
+
+# Data params
+image_directory: 'data/images'
+label_directory: 'data/labels'
+test_split: 0.4
+mask_threshold: 0.5
+shuffle: True
+augment: True
+crop_image: False
+
+# Output params
+output_dir: 'output'
+epochs_per_checkpoint: 10
